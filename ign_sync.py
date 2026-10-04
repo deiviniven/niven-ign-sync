@@ -40,11 +40,12 @@ HEADERS = {
 }
 
 
-def fetch_html(day) -> str:
-    """Pide un solo día (el IGN muestra como mucho ~50 filas por búsqueda)."""
+def fetch_html(day, box) -> str:
+    """Pide un día y un recuadro (el IGN pagina los resultados de 50 en 50)."""
+    la0, la1, lo0, lo1 = box
     params = {
-        "latMin": LAT_MIN, "latMax": LAT_MAX,
-        "longMin": LON_MIN, "longMax": LON_MAX,
+        "latMin": round(la0, 5), "latMax": round(la1, 5),
+        "longMin": round(lo0, 5), "longMax": round(lo1, 5),
         "startDate": day.strftime("%d/%m/%Y"),
         "endDate": day.strftime("%d/%m/%Y"),
         "selIntensidad": "N", "selMagnitud": "N",
@@ -142,6 +143,36 @@ def parse(html: str) -> dict:
     return eventos
 
 
+PAGINA = 50  # filas por página del buscador del IGN
+
+
+def filas(html: str) -> int:
+    """Número de sismos que muestra la tabla de resultados."""
+    try:
+        tablas = pd.read_html(io.StringIO(html), match="Evento", flavor="lxml")
+    except ValueError:
+        return 0
+    return max(len(t) for t in tablas)
+
+
+def fetch_dia(day, box=(LAT_MIN, LAT_MAX, LON_MIN, LON_MAX), nivel=0) -> dict:
+    """Si un recuadro llena la página (50 filas), lo parte en 4 y repite.
+    Así se recogen todos los sismos aunque un día haya cientos."""
+    html = fetch_html(day, box)
+    time.sleep(1.5)  # sin prisas con el servidor del IGN
+    if filas(html) >= PAGINA and nivel < 6:
+        la0, la1, lo0, lo1 = box
+        lam, lom = (la0 + la1) / 2, (lo0 + lo1) / 2
+        eventos = {}
+        for sub in ((la0, lam, lo0, lom), (la0, lam, lom, lo1),
+                    (lam, la1, lo0, lom), (lam, la1, lom, lo1)):
+            eventos.update(fetch_dia(day, sub, nivel + 1))
+        return eventos
+    if filas(html) >= PAGINA:
+        print(f"AVISO: {day:%d/%m} sigue con 50 filas en un recuadro mínimo.")
+    return parse(html)
+
+
 def firebase_token(sa_json: str) -> str:
     from google.oauth2 import service_account
     from google.auth.transport.requests import Request
@@ -162,25 +193,20 @@ def main() -> int:
     dry = os.environ.get("DRY_RUN") == "1"
 
     today = datetime.now(MADRID).date()
-    eventos, html = {}, ""
+    eventos = {}
     for i in range(days, -1, -1):
         day = today - timedelta(days=i)
-        html = fetch_html(day)
-        del_dia = parse(html)
-        filas = html.count("<tr") - 1
-        print(f"  {day:%d/%m}: {len(del_dia)} microsismos (de ~{max(filas, 0)} filas en la página)")
-        if filas >= 50:
-            print(f"AVISO: el {day:%d/%m} llega a 50 filas; puede que el IGN pagine la lista.")
+        del_dia = fetch_dia(day)
+        print(f"  {day:%d/%m}: {len(del_dia)} microsismos")
         eventos.update(del_dia)
-        time.sleep(3)  # sin prisas con el servidor del IGN
     print(f"IGN: {len(eventos)} microsismos (<{MAG_MAX}) en el recuadro (hoy y {days} días atrás)")
     if eventos:
         mags = [e["mag"] for e in eventos.values() if e["mag"] is not None]
         ult = max(e["t"] for e in eventos.values())
         print(f"  magnitud mín/máx: {min(mags)} / {max(mags)}")
         print(f"  más reciente: {datetime.fromtimestamp(ult/1000, MADRID):%d/%m %H:%M} (hora local)")
-    elif "Evento" not in html:
-        print("AVISO: la página no trae tabla de resultados; quizá el IGN la ha cambiado.")
+    else:
+        print("AVISO: 0 microsismos; si se repite, quizá el IGN ha cambiado su página.")
 
     if dry:
         print(json.dumps(list(eventos.items())[:3], ensure_ascii=False, indent=1))
@@ -190,8 +216,10 @@ def main() -> int:
     token = firebase_token(os.environ["FIREBASE_SA_JSON"])
     auth = {"access_token": token}
 
-    if eventos:
-        r = requests.patch(f"{db}/ign/events.json", params=auth, json=eventos, timeout=60)
+    lote = list(eventos.items())
+    for k in range(0, len(lote), 500):  # en tandas, por si es una carga grande
+        r = requests.patch(f"{db}/ign/events.json", params=auth,
+                           json=dict(lote[k:k + 500]), timeout=60)
         r.raise_for_status()
 
     meta = {
