@@ -9,6 +9,10 @@ on:
         description: "Solo probar (no escribe en Firebase)"
         type: boolean
         default: false
+      dias:
+        description: "Días hacia atrás (3 normal; 52 para cargar desde el 14 de agosto)"
+        type: string
+        default: "3"
 
 concurrency:
   group: ign-sync
@@ -17,7 +21,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -33,6 +37,6 @@ jobs:
         env:
           FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
           FIREBASE_SA_JSON: ${{ secrets.FIREBASE_SA_JSON }}
-          IGN_DAYS: "3"
+          IGN_DAYS: ${{ inputs.dias || '3' }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: python ign_sync.py
