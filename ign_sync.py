@@ -54,14 +54,14 @@ def fetch_html(day, box) -> str:
         "fases": "no", "cond": "",
     }
     last_err = None
-    for intento in range(3):
+    for espera in (0, 15, 30, 60, 90):  # el IGN a veces da 502 si se le pide mucho
+        time.sleep(espera)
         try:
             r = requests.get(IGN_URL, params=params, headers=HEADERS, timeout=60)
             r.raise_for_status()
             return r.text
         except requests.RequestException as e:
             last_err = e
-            time.sleep(10 * (intento + 1))
     raise RuntimeError(f"No se pudo descargar el catálogo del IGN: {last_err}")
 
 
@@ -159,7 +159,7 @@ def fetch_dia(day, box=(LAT_MIN, LAT_MAX, LON_MIN, LON_MAX), nivel=0) -> dict:
     """Si un recuadro llena la página (50 filas), lo parte en 4 y repite.
     Así se recogen todos los sismos aunque un día haya cientos."""
     html = fetch_html(day, box)
-    time.sleep(1.5)  # sin prisas con el servidor del IGN
+    time.sleep(3)  # sin prisas con el servidor del IGN
     if filas(html) >= PAGINA and nivel < 6:
         la0, la1, lo0, lo1 = box
         lam, lom = (la0 + la1) / 2, (lo0 + lo1) / 2
@@ -193,13 +193,44 @@ def main() -> int:
     dry = os.environ.get("DRY_RUN") == "1"
 
     today = datetime.now(MADRID).date()
-    eventos = {}
-    for i in range(days, -1, -1):
-        day = today - timedelta(days=i)
-        del_dia = fetch_dia(day)
-        print(f"  {day:%d/%m}: {len(del_dia)} microsismos")
-        eventos.update(del_dia)
+    auth = db = None
+    if not dry:
+        db = os.environ["FIREBASE_DB_URL"].rstrip("/")
+        auth = {"access_token": firebase_token(os.environ["FIREBASE_SA_JSON"])}
+
+    def guardar(evs: dict):
+        """Guarda en Firebase según avanza, para no perder lo ya descargado."""
+        if dry or not evs:
+            return
+        lote = list(evs.items())
+        for k in range(0, len(lote), 500):
+            requests.patch(f"{db}/ign/events.json", params=auth,
+                           json=dict(lote[k:k + 500]), timeout=60).raise_for_status()
+
+    eventos, fallidos = {}, []
+    dias = [today - timedelta(days=i) for i in range(days, -1, -1)]
+    for ronda in (1, 2):
+        pendientes = dias if ronda == 1 else fallidos
+        if ronda == 2:
+            if not fallidos:
+                break
+            print(f"Reintentando {len(fallidos)} día(s) tras una pausa…")
+            time.sleep(120)
+            fallidos = []
+        for day in pendientes:
+            try:
+                del_dia = fetch_dia(day)
+            except RuntimeError as e:
+                print(f"  {day:%d/%m}: FALLO ({e.__class__.__name__}: IGN no responde)")
+                fallidos.append(day)
+                continue
+            print(f"  {day:%d/%m}: {len(del_dia)} microsismos")
+            eventos.update(del_dia)
+            guardar(del_dia)
     print(f"IGN: {len(eventos)} microsismos (<{MAG_MAX}) en el recuadro (hoy y {days} días atrás)")
+    if fallidos:
+        print("Días sin descargar (vuelve a lanzarlo más tarde): "
+              + ", ".join(f"{d:%d/%m}" for d in fallidos))
     if eventos:
         mags = [e["mag"] for e in eventos.values() if e["mag"] is not None]
         ult = max(e["t"] for e in eventos.values())
@@ -212,25 +243,15 @@ def main() -> int:
         print(json.dumps(list(eventos.items())[:3], ensure_ascii=False, indent=1))
         return 0
 
-    db = os.environ["FIREBASE_DB_URL"].rstrip("/")
-    token = firebase_token(os.environ["FIREBASE_SA_JSON"])
-    auth = {"access_token": token}
-
-    lote = list(eventos.items())
-    for k in range(0, len(lote), 500):  # en tandas, por si es una carga grande
-        r = requests.patch(f"{db}/ign/events.json", params=auth,
-                           json=dict(lote[k:k + 500]), timeout=60)
-        r.raise_for_status()
-
     meta = {
         "lastRun": int(time.time() * 1000),
         "count": len(eventos),
         "days": days,
-        "ok": True,
+        "ok": not fallidos,
     }
     requests.put(f"{db}/ign/meta.json", params=auth, json=meta, timeout=30).raise_for_status()
     print("Firebase actualizado.")
-    return 0
+    return 1 if fallidos else 0
 
 
 if __name__ == "__main__":
