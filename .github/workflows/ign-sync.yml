@@ -1,0 +1,38 @@
+name: Sincronizar IGN (Vega de Granada)
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Solo probar (no escribe en Firebase)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ign-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - name: Leer catálogo del IGN y guardar en Firebase
+        env:
+          FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
+          FIREBASE_SA_JSON: ${{ secrets.FIREBASE_SA_JSON }}
+          IGN_DAYS: "3"
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: python ign_sync.py
