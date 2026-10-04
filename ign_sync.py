@@ -27,7 +27,6 @@ import requests
 # Recuadro amplio de la Vega de Granada
 LAT_MIN, LAT_MAX = 37.05, 37.30
 LON_MIN, LON_MAX = -3.85, -3.50
-MAG_MAX = 1.5  # se guardan solo los sismos con magnitud menor que esta
 
 IGN_URL = (
     "https://www.ign.es/web/ign/portal/sis-catalogo-terremotos/-/"
@@ -126,8 +125,9 @@ def parse(html: str) -> dict:
             if not (LAT_MIN <= lat <= LAT_MAX and LON_MIN <= lon <= LON_MAX):
                 continue
             mag = _num(f[c_mag]) if c_mag else None
-            # Solo microsismos: los de 1,5 o más ya llegan antes por EMSC
-            if mag is None or mag >= MAG_MAX:
+            # Se guardan todas las magnitudes: los <1,5 son los microsismos que
+            # EMSC no publica; los ≥1,5 sirven de respaldo si EMSC aún no los tiene
+            if mag is None:
                 continue
             eventos[evid] = {
                 "t": int(dt.timestamp() * 1000),  # epoch ms UTC
@@ -224,10 +224,11 @@ def main() -> int:
                 print(f"  {day:%d/%m}: FALLO ({e.__class__.__name__}: IGN no responde)")
                 fallidos.append(day)
                 continue
-            print(f"  {day:%d/%m}: {len(del_dia)} microsismos")
+            print(f"  {day:%d/%m}: {len(del_dia)} sismos")
             eventos.update(del_dia)
             guardar(del_dia)
-    print(f"IGN: {len(eventos)} microsismos (<{MAG_MAX}) en el recuadro (hoy y {days} días atrás)")
+    print(f"IGN: {len(eventos)} sismos en el recuadro (hoy y {days} días atrás), "
+          f"{sum(1 for e in eventos.values() if e['mag'] < 1.5)} microsismos")
     if fallidos:
         print("Días sin descargar (vuelve a lanzarlo más tarde): "
               + ", ".join(f"{d:%d/%m}" for d in fallidos))
